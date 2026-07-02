@@ -1,0 +1,74 @@
+name: Daily Firestore Backup
+
+on:
+  schedule:
+    - cron: '0 15 * * *' # 毎日 深夜0時 JST (= UTC 15:00)
+  workflow_dispatch: # 手動実行ボタン
+  # 外部からのPull Requestではワークフローを起動しない
+  # （悪意あるPRがSecretsを盗もうとする攻撃を防ぐ）
+  # push/schedule/workflow_dispatch のみが有効なトリガー
+
+permissions:
+  contents: read  # actions/checkout がリポジトリを読み取るために必要
+
+concurrency:
+  group: backup
+  cancel-in-progress: false  # 実行中のバックアップを中断しない
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    # フォークからのPRではこのジョブを実行しない（Secrets漏洩対策）
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🛠 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-backup-firebase-admin-12
+          restore-keys: |
+            ${{ runner.os }}-backup-
+
+      # バージョンを固定して予期しないアップデートを防ぐ
+      - name: 📦 Install backup dependencies
+        run: npm install --no-save firebase-admin@12
+
+      - name: 🔥 Run Firestore backup
+        id: backup
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/backup-firestore.mjs
+
+      - name: 🔍 Verify backup integrity
+        id: verify
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        continue-on-error: true
+        run: node scripts/verify-exact.mjs
+
+      - name: ☁️ Upload to GitHub Artifacts
+        if: steps.backup.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ github.run_number }}
+          path: backup-output/
+          retention-days: 365
+
+      # verify が差異を検出した場合、アップロード後にジョブを失敗させてメール通知を送る
+      - name: ❌ Fail if verify found issues
+        if: steps.verify.outcome == 'failure'
+        run: |
+          echo "❌ バックアップ照合で差異が検出されました。上記のログを確認してください。"
+          exit 1
