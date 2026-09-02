@@ -58,13 +58,52 @@ jobs:
         continue-on-error: true
         run: node scripts/verify-exact.mjs
 
+      # ■ なぜ暗号化するか
+      # このリポジトリは公開している。GitHub の成果物は「リポジトリを読める人」
+      # がダウンロードでき、公開リポジトリではそれは全世界のログイン済み利用者
+      # を指す（管理権限は要らない）。2026-09-03 に、管理権限を持たない別アカ
+      # ウントから一覧・サイズ・ダウンロード導線が見えることを実際に確かめた。
+      #
+      # 中身は本番の Firestore・RTDB・Firebase Auth で、利用者のメールアドレスと
+      # パスワードのハッシュ・salt を含む。素のままでは置けないので、鍵が無ければ
+      # 読めない形にしてから上げる。
+      #
+      # 照合（verify）は素のファイルを読むので、その後に暗号化する。
+      - name: 🔐 Encrypt backup
+        if: steps.backup.outcome == 'success'
+        env:
+          KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::BACKUP_ENCRYPTION_KEY が設定されていません。"
+            echo "素のバックアップを公開の場へ上げないため、ここで止めます。"
+            echo "リポジトリの Settings → Secrets and variables → Actions で設定してください。"
+            exit 1
+          fi
+          shopt -s nullglob
+          files=(backup-output/*.json.gz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::backup-output/ に控えがありません。"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            gpg --batch --yes --quiet --symmetric --cipher-algo AES256 \
+                --passphrase "$KEY" --output "$f.gpg" "$f"
+            rm -f "$f"                       # 素のファイルは残さない
+          done
+          echo "暗号化しました:"
+          ls -l backup-output/
+
+      # 上の段で素のファイルを消しているので、ここで上がるのは .gpg だけ。
+      # 保持は90日。公開リポジトリの上限が90日で、それ以上を書いても
+      # 切り詰められる（以前は 365 と書いてあり、毎回警告が出ていた）
       - name: ☁️ Upload to GitHub Artifacts
         if: steps.backup.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: backup-${{ github.run_number }}
           path: backup-output/
-          retention-days: 365
+          retention-days: 90
 
       # verify が差異を検出した場合、アップロード後にジョブを失敗させてメール通知を送る
       - name: ❌ Fail if verify found issues
