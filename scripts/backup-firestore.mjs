@@ -1,6 +1,6 @@
 // scripts/backup-firestore.mjs
-// Firestore + RTDB の全データを GitHub Artifacts に毎日バックアップするスクリプト
-// 保存期間: 365日（GitHub Actionsのretention-days設定で管理）
+// Firestore・RTDB の全データと Auth の利用者の一覧を、毎日バックアップするスクリプト
+// 保存期間: 90日（公開リポジトリの成果物の上限。.github/workflows/backup.yml の retention-days）。暗号化はワークフローがする
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
