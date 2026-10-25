@@ -1,6 +1,8 @@
 // scripts/verify-exact.mjs
 // バックアップ直後にFirestoreの実データと1文字単位で照合するスクリプト
 // backup.yml の中でバックアップ実行直後に呼ばれる
+// ログは公開の倉庫の Actions に残る。団体ID・団体名・文書の ID・中身の値・メールアドレス・uid・
+// RTDB の枝（団体の合言葉）は出さない。どこが違ったかは、数と項目の名前と何番目の団体かで出す
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -95,14 +97,13 @@ function normalizeBk(value) {
 // 差分検出
 // ─────────────────────────────────────────
 
-function diffObjects(fbData, bkData, prefix, diffs) {
+/** 違う項目の名前を集める（値は集めない） */
+function diffObjects(fbData, bkData, diffs) {
   const allKeys = new Set([...Object.keys(fbData || {}), ...Object.keys(bkData || {})]);
   for (const key of allKeys) {
     const fb = JSON.stringify(normalize(fbData?.[key]));
     const bk = JSON.stringify(normalizeBk(bkData?.[key]));
-    if (fb !== bk) {
-      diffs.push({ path: `${prefix}.${key}`, fb: fb?.slice(0, 100), bk: bk?.slice(0, 100) });
-    }
+    if (fb !== bk) diffs.push(key);
   }
 }
 
@@ -123,29 +124,24 @@ async function verifyCollection(colRef, bkDocs, label) {
   const extraInBk = [...bkIdSet].filter(id => !fbIdSet.has(id));
   if (missingInBk.length || extraInBk.length) {
     console.log(`  ❌ ${label}: 件数不一致 Firebase=${fbIds.length} BK=${Object.keys(bkMap).length}`);
-    if (missingInBk.length) console.log(`     BK未収録ID: ${missingInBk.slice(0, 5).join(', ')}`);
-    if (extraInBk.length) console.log(`     BK余分ID:   ${extraInBk.slice(0, 5).join(', ')}`);
+    if (missingInBk.length) console.log(`     BK未収録: ${missingInBk.length} 件`);
+    if (extraInBk.length) console.log(`     BK余分:   ${extraInBk.length} 件`);
     errors++;
   }
 
   let fieldDiffs = 0;
+  const 違う項目 = new Set();
   for (const docRef of docRefs) {
     if (!bkIdSet.has(docRef.id)) continue;
     const snap = await docRef.get();
     const fbFields = snap.exists ? snap.data() : {};
     const bkFields = bkMap[docRef.id] || {};
     const diffs = [];
-    diffObjects(fbFields, bkFields, docRef.id, diffs);
-    if (diffs.length > 0) {
-      fieldDiffs += diffs.length;
-      for (const d of diffs.slice(0, 2)) {
-        console.log(`     差分 ${d.path}`);
-        console.log(`       Firebase:  ${d.fb}`);
-        console.log(`       バックアップ: ${d.bk}`);
-      }
-      if (diffs.length > 2) console.log(`     ... 他 ${diffs.length - 2} 件`);
-    }
+    diffObjects(fbFields, bkFields, diffs);
+    fieldDiffs += diffs.length;
+    diffs.forEach(項目 => 違う項目.add(項目));
   }
+  if (違う項目.size) console.log(`     違う項目: ${[...違う項目].slice(0, 10).join(', ')}`);
 
   if (fieldDiffs > 0) {
     console.log(`  ❌ ${label}: フィールド差分 ${fieldDiffs} 箇所`);
@@ -174,15 +170,14 @@ async function main() {
   totalErrors += await verifyCollection(gaColRef, bFirestore.group_accounts, 'group_accounts');
 
   const gaDocs = await gaColRef.listDocuments();
-  for (const gaDocRef of gaDocs) {
+  for (const [番, gaDocRef] of gaDocs.entries()) {
     const gid = gaDocRef.id;
-    const gaSnap = await gaDocRef.get();
-    const name = gaSnap.exists ? (gaSnap.data().name || '不明') : '不明';
-    console.log(`\n=== グループ ${gid} (${name}) ===`);
+    // 団体ID・団体名は出さない（何番目かだけ）
+    console.log(`\n=== 団体 ${番 + 1}/${gaDocs.length} ===`);
 
     const bkGroup = bkGroups.find(g => g.id === gid);
     if (!bkGroup) {
-      console.log(`  ⚠️ groups にデータなし（新規グループの可能性）: ${gid}`);
+      console.log('  ⚠️ groups にデータなし（新規の団体の可能性）');
       continue;
     }
 
@@ -213,10 +208,11 @@ async function main() {
     console.log(`  ✅ RTDB 全データ: 完全一致`);
   } else {
     console.log(`  ❌ RTDB: 差分あり`);
+    // 根の下（live_sessions など）だけを名前で出す。その下の枝は団体の合言葉なので出さない
     for (const key of new Set([...Object.keys(fbRtdb), ...Object.keys(bkRtdb)])) {
       const fb = JSON.stringify(normalize(fbRtdb[key]));
       const bk = JSON.stringify(normalizeBk(bkRtdb[key]));
-      if (fb !== bk) console.log(`     差分パス: /${key}`);
+      if (fb !== bk) console.log(`     差分のある根: /${key}`);
     }
     totalErrors++;
   }
@@ -240,21 +236,16 @@ async function main() {
 
   if (missingUids.length || extraUids.length) {
     console.log(`  ❌ Auth: 件数不一致 Firebase=${authUsers.length} BK=${bkUsers.length}`);
-    if (missingUids.length) console.log(`     BK未収録UID: ${missingUids.slice(0, 3).join(', ')}`);
-    if (extraUids.length) console.log(`     BK余分UID:   ${extraUids.slice(0, 3).join(', ')}`);
+    if (missingUids.length) console.log(`     BK未収録: ${missingUids.length} 人`);
+    if (extraUids.length) console.log(`     BK余分:   ${extraUids.length} 人`);
     totalErrors++;
   } else {
     for (const fbUser of authUsers) {
       const bkUser = bkUidMap[fbUser.uid];
       if (!bkUser) continue;
-      if (fbUser.email !== bkUser.email) {
-        console.log(`     差分 uid=${fbUser.uid} email: FB=${fbUser.email} BK=${bkUser.email}`);
-        authDiffs++;
-      }
-      if (fbUser.metadata?.creationTime !== bkUser.createdAt) {
-        console.log(`     差分 uid=${fbUser.uid} createdAt: FB=${fbUser.metadata?.creationTime} BK=${bkUser.createdAt}`);
-        authDiffs++;
-      }
+      // uid とメールアドレスは出さない（数だけ）
+      if (fbUser.email !== bkUser.email) authDiffs++;
+      if (fbUser.metadata?.creationTime !== bkUser.createdAt) authDiffs++;
     }
     if (authDiffs > 0) {
       console.log(`  ❌ Auth: フィールド差分 ${authDiffs} 箇所`);

@@ -1,6 +1,7 @@
 // scripts/backup-firestore.mjs
 // Firestore・RTDB の全データと Auth の利用者の一覧を、毎日バックアップするスクリプト
 // 保存期間: 90日（公開リポジトリの成果物の上限。.github/workflows/backup.yml の retention-days）。暗号化はワークフローがする
+// ログは公開の倉庫の Actions に残る。団体ID・団体名・人の名前・ライブの枝（団体の合言葉）・ライブ名は出さず、数だけを出す
 
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -159,22 +160,15 @@ async function main() {
     const rtdbSnap = await rtdb.ref('/').once('value');
     const rtdbData = rtdbSnap.val() ?? {};
 
+    // live_sessions/{枝}/{ライブ名}/state。枝は団体ごとの合言葉なので、名前は出さない
     const liveSessions = rtdbData.live_sessions ?? {};
-    const liveGroupIds = Object.keys(liveSessions);
-    if (liveGroupIds.length === 0) {
+    const 枝たち = Object.values(liveSessions);
+    if (枝たち.length === 0) {
       console.log('✅ RTDB live_sessions: 空（未保存データなし）');
     } else {
-      for (const gid of liveGroupIds) {
-        const sessions = liveSessions[gid] ?? {};
-        const sessionNames = Object.keys(sessions);
-        const activeSessions = sessionNames.filter(
-          name => sessions[name]?.state?.status === 'active'
-        );
-        console.log(`⚠️  RTDB グループ ${gid}: ${sessionNames.length}セッション（うちactive: ${activeSessions.length}件）`);
-        if (activeSessions.length > 0) {
-          console.log(`    未保存セッション: [${activeSessions.join(', ')}]`);
-        }
-      }
+      const ライブたち = 枝たち.flatMap(枝 => Object.values(枝 ?? {}));
+      const 途中 = ライブたち.filter(ライブ => ライブ?.state?.status === 'active').length;
+      console.log(`⚠️  RTDB live_sessions: ${枝たち.length} 団体・${ライブたち.length} ライブ（うち途中: ${途中}）`);
     }
     backupData.rtdb = rtdbData;
     console.log('');
