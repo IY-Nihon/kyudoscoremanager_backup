@@ -6,7 +6,7 @@ on:
   workflow_dispatch: # 手動実行ボタン
   # 外部からのPull Requestではワークフローを起動しない
   # （悪意あるPRがSecretsを盗もうとする攻撃を防ぐ）
-  # push/schedule/workflow_dispatch のみが有効なトリガー
+  # schedule/workflow_dispatch のみが有効なトリガー
 
 permissions:
   contents: read  # actions/checkout がリポジトリを読み取るために必要
@@ -27,23 +27,21 @@ jobs:
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # GitHub のトークンを手元に残さない（後の段で使わない）
 
+      # Node.js 20 は 2026-04 で手入れが終わった
       - name: 🛠 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
+          cache: npm  # package-lock.json の中身で控える
 
-      - name: 📦 Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-backup-firebase-admin-12
-          restore-keys: |
-            ${{ runner.os }}-backup-
-
-      # バージョンを固定して予期しないアップデートを防ぐ
+      # ■ 部品は package-lock.json の版と中身の印（integrity）のとおりに入れる
+      # この後の段で、本番を読み書きできるサービスアカウントの鍵を渡す。部品が知らないうちに差し替わって
+      # 鍵を抜かれないよう、版を固定し、install の台本（postinstall など）は走らせない
       - name: 📦 Install backup dependencies
-        run: npm install --no-save firebase-admin@12
+        run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: 🔥 Run Firestore backup
         id: backup
@@ -59,18 +57,22 @@ jobs:
         run: node scripts/verify-exact.mjs
 
       # ■ なぜ暗号化するか
-      # このリポジトリは公開している。GitHub の成果物は「リポジトリを読める人」
-      # がダウンロードでき、公開リポジトリではそれは全世界のログイン済み利用者
-      # を指す（管理権限は要らない）。2026-09-03 に、管理権限を持たない別アカ
-      # ウントから一覧・サイズ・ダウンロード導線が見えることを実際に確かめた。
+      # 動かしているのは非公開の倉庫（2026-11 から。前は公開の倉庫で動かしていて、成果物は
+      # ログイン済みの誰でも取り寄せられた。2026-09-03 に、管理権限を持たない別アカウントから
+      # 一覧・サイズ・ダウンロード導線が見えることを実際に確かめた）。
+      # 非公開でも、倉庫を読める人と、倉庫を読める GitHub のトークンを持つものは成果物を取り寄せられる。
       #
       # 中身は本番の Firestore・RTDB と Firebase Auth の利用者の一覧（uid・メールアドレス・
       # 作った日時・最後に入った日時。パスワードのハッシュは取っていない）。部員の名前や記録も
       # 入っているので、素のままでは置けない。鍵が無ければ読めない形にしてから上げる。
       #
+      # ■ 合言葉はコマンドの行に載せない
+      # --passphrase に渡すと、同じ機械のほかの手続きから ps で見える。標準入力（--passphrase-fd 0）で渡し、
+      # gpg-agent にも覚えさせない（--no-symkey-cache）。
+      # 暗号化したら、その場で戻して元と同じかを確かめてから素のファイルを消す（戻せない控えを上げない）。
+      #
       # ■ ログにも出さない
-      # Actions のログも公開の場に残る。スクリプトは数と項目の名前だけを出す（団体ID・名前・
-      # メール・ライブの枝は出さない。scripts の頭の説明）
+      # スクリプトは数と項目の名前だけを出す（団体ID・名前・メール・ライブの枝は出さない。scripts の頭の説明）
       #
       # 照合（verify）は素のファイルを読むので、その後に暗号化する。
       - name: 🔐 Encrypt backup
@@ -80,7 +82,7 @@ jobs:
         run: |
           if [ -z "$KEY" ]; then
             echo "::error::BACKUP_ENCRYPTION_KEY が設定されていません。"
-            echo "素のバックアップを公開の場へ上げないため、ここで止めます。"
+            echo "素のバックアップを上げないため、ここで止めます。"
             echo "リポジトリの Settings → Secrets and variables → Actions で設定してください。"
             exit 1
           fi
@@ -90,17 +92,28 @@ jobs:
             echo "::error::backup-output/ に控えがありません。"
             exit 1
           fi
+          gpg_opts=(--batch --yes --quiet --no-symkey-cache --pinentry-mode loopback --passphrase-fd 0)
           for f in "${files[@]}"; do
-            gpg --batch --yes --quiet --symmetric --cipher-algo AES256 \
-                --passphrase "$KEY" --output "$f.gpg" "$f"
+            printf '%s' "$KEY" | gpg "${gpg_opts[@]}" --symmetric --cipher-algo AES256 \
+                --s2k-digest-algo SHA512 --s2k-count 65011712 --output "$f.gpg" "$f"
+            want=$(sha256sum < "$f" | cut -d' ' -f1)
+            got=$(printf '%s' "$KEY" | gpg "${gpg_opts[@]}" --decrypt "$f.gpg" | sha256sum | cut -d' ' -f1)
+            if [ "$want" != "$got" ]; then
+              echo "::error::暗号化した控えを戻せませんでした。上げずに止めます。"
+              rm -f "$f" "$f.gpg"
+              exit 1
+            fi
             rm -f "$f"                       # 素のファイルは残さない
           done
-          echo "暗号化しました:"
+          echo "暗号化しました（戻せることも確かめました）:"
           ls -l backup-output/
 
       # 上の段で素のファイルを消しているので、ここで上がるのは .gpg だけ。
-      # 保持は90日。公開リポジトリの上限が90日で、それ以上を書いても
-      # 切り詰められる（以前は 365 と書いてあり、毎回警告が出ていた）
+      # ■ 保持は 90 日
+      # 非公開の倉庫の成果物は、持ち主の無料の置き場（GitHub Free は 500MB。Packages と分け合う）を使い、
+      # いっぱいになると新しい成果物を上げられなくなる（その日の控えが残らない）。
+      # backup のログの「90 日分でおおよそ」が 500MB に収まるかを見る。日数を延ばすときは、
+      # 倉庫の設定（Settings → Actions → General の保持日数。非公開は 400 日まで）も上げ、置き場の大きさも見直す
       - name: ☁️ Upload to GitHub Artifacts
         if: steps.backup.outcome == 'success'
         uses: actions/upload-artifact@v4
