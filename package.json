@@ -1,0 +1,15 @@
+{
+  "name": "kyudoscoremanager-backup",
+  "private": true,
+  "description": "弓道部的中ノートの本番データを毎日バックアップする仕組み（動かすのは非公開の倉庫）",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "backup": "node scripts/backup-firestore.mjs",
+    "verify": "node scripts/verify-exact.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "14.5.0"
+  }
+}
