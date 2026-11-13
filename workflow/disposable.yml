@@ -1,0 +1,47 @@
+name: Weekly disposable-domain sync
+
+# 使い捨てメールのドメインの一覧に、増えたぶんだけ足す（scripts/sync-disposable.mjs。2026-11-13）
+on:
+  schedule:
+    - cron: '30 18 * * 0' # 毎週 月曜 3:30 JST（= 日曜 18:30 UTC）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '数えるだけ（書かない）'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: disposable
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # 鍵を渡す前に、部品は package-lock.json のとおりに入れる（backup.yml と同じ）
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Sync disposable domains
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        run: node scripts/sync-disposable.mjs
