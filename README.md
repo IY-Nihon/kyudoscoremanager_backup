@@ -62,3 +62,9 @@ Firebase は無料版（Spark）、GitHub も無料の枠で動かしている�
 ## 使っているもの
 
 Node.js 24 / firebase-admin 14 / GitHub Actions / gpg（AES256）
+
+## 使い捨てメールの一覧の取り込み（週 1 回）
+
+`scripts/sync-disposable.mjs` が、公開の一覧（disposable-email-domains）で増えたドメインだけを Firestore の `disposable_domains` に足す（毎週 月曜 3:30 JST。ワークフローは `disposable.yml`）。
+足すだけで消さない。ふつうの人が使うドメイン（携帯会社・プロバイダー・学校）は、載っていても足さない。一覧が小さすぎる・増える数が多すぎるときは何も書かずに失敗で終わる。
+手で動かすときは「数えるだけ」が既定。読みは 1 回に約 1 万回（Firestore の無料枠は 1 日 5 万回）。
